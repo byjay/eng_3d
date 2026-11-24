@@ -30,9 +30,12 @@ import type {
   HabitProgress,
   ScenarioTemplate,
   SentenceFormMode,
+  TutorExpressionPhoto,
   TutorMood,
   TutorProfile,
+  VisemeId,
 } from '../core/types';
+import { resolveAssetUrl } from '../core/androidBridge';
 import { TutorStage3D, type PlaybackTimeline } from './TutorStage3D';
 
 interface StudyGuide3DProps {
@@ -46,6 +49,9 @@ interface StudyGuide3DProps {
   playbackRef: React.MutableRefObject<PlaybackTimeline>;
   fallback2D: boolean;
   onWebGlLost: () => void;
+  tutorExpressions: TutorExpressionPhoto[];
+  previewExpression: TutorExpressionPhoto | null;
+  onPreviewExpression: (exp: TutorExpressionPhoto | null) => void;
   onSpeakText: (text: string, speed?: number, mood?: TutorMood, gestureSlug?: string) => void;
   onStopSpeech: () => void;
   habitProgress: HabitProgress;
@@ -69,6 +75,9 @@ export function StudyGuide3D({
   playbackRef,
   fallback2D,
   onWebGlLost,
+  tutorExpressions,
+  previewExpression,
+  onPreviewExpression,
   onSpeakText,
   onStopSpeech,
   habitProgress,
@@ -110,8 +119,26 @@ export function StudyGuide3D({
   const [autoShadowLoop, setAutoShadowLoop] = useState(false);
   const [shadowPromptBanner, setShadowPromptBanner] = useState<string | null>(null);
   const [showDialogues, setShowDialogues] = useState(false);
+  const [showExpressionDb, setShowExpressionDb] = useState(false);
+  const [visemeFilter, setVisemeFilter] = useState<VisemeId | 'ALL'>('ALL');
+  const [expressionQuery, setExpressionQuery] = useState('');
   const [habitOnlyMode, setHabitOnlyMode] = useState(false);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
+
+  const filteredTutorExpressions = useMemo(() => {
+    const q = expressionQuery.trim().toLowerCase();
+    return tutorExpressions.filter((item) => {
+      if (visemeFilter !== 'ALL' && item.visemeId !== visemeFilter) return false;
+      if (!q) return true;
+      return (
+        item.photoCode.toLowerCase().includes(q) ||
+        item.expressionCode.toLowerCase().includes(q) ||
+        item.ipa.toLowerCase().includes(q) ||
+        item.sampleWord.toLowerCase().includes(q) ||
+        item.nameKo.toLowerCase().includes(q)
+      );
+    });
+  }, [tutorExpressions, visemeFilter, expressionQuery]);
 
   const filteredScenarios = useMemo(
     () => filterScenarios(SCENARIOS_300_LINKED, selectedDomain, searchQuery),
@@ -274,6 +301,7 @@ export function StudyGuide3D({
           fallback2D={fallback2D}
           onWebGlLost={onWebGlLost}
           cameraPreset="portrait"
+          previewExpression={previewExpression}
         />
 
         {/* Compact Top Tutor Switcher */}
@@ -448,9 +476,123 @@ export function StudyGuide3D({
               >
                 상황 대화 {activeScenario.dialogues.length}턴
               </button>
+
+              <button
+                type="button"
+                onClick={() => setShowExpressionDb((v) => !v)}
+                className={`px-3 py-2 text-xs font-medium rounded-lg border whitespace-nowrap shrink-0 cursor-pointer ${
+                  showExpressionDb
+                    ? 'bg-amber-400 text-slate-950 border-amber-300 font-semibold'
+                    : 'bg-slate-900 text-amber-200 border-slate-800 hover:border-amber-400/60'
+                }`}
+              >
+                발음·표정 DB ({tutorExpressions.length})
+              </button>
             </div>
           </div>
         </div>
+
+        {/* Per-Tutor 52 Gemini Banana Pronunciation Mouth & Expression Photo DB Explorer */}
+        {showExpressionDb && (
+          <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 space-y-3" data-testid="expression-db-panel">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-white">
+                  {activeTutor.name} · Gemini Banana 발음 입모양 & 표정 사진 DB ({filteredTutorExpressions.length} / {tutorExpressions.length})
+                </h3>
+                <p className="text-xs text-slate-400">
+                  카드를 누르면 해당 튜터의 실사 입모양·표정으로 전환되고 영어 단어를 발음합니다.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {previewExpression && (
+                  <button
+                    type="button"
+                    onClick={() => onPreviewExpression(null)}
+                    className="px-2.5 py-1 text-xs rounded-lg bg-slate-800 text-slate-200 hover:text-white cursor-pointer"
+                  >
+                    미리보기 해제
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowExpressionDb(false)}
+                  className="text-xs text-slate-400 hover:text-white cursor-pointer"
+                >
+                  닫기
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              <input
+                type="text"
+                value={expressionQuery}
+                onChange={(e) => setExpressionQuery(e.target.value)}
+                placeholder="음소·단어 검색 (예: thank, /θ/, latte)..."
+                aria-label="Search tutor mouth expressions"
+                className="w-56 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-400"
+              />
+              {(['ALL', 'PP', 'FF', 'TH', 'DD', 'kk', 'CH', 'SS', 'nn', 'RR', 'aa', 'E', 'I', 'O', 'U', 'sil'] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => setVisemeFilter(v)}
+                  className={`px-2 py-1 text-[11px] font-mono rounded-lg border cursor-pointer ${
+                    visemeFilter === v
+                      ? 'bg-sky-400 text-slate-950 border-sky-400 font-semibold'
+                      : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-600'
+                  }`}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+
+            <div className="max-h-72 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pr-1">
+              {filteredTutorExpressions.map((item) => {
+                const isSelected = previewExpression?.photoCode === item.photoCode;
+                const bgPosX = `${(item.tileCol / 3) * 100}%`;
+                const bgPosY = `${(item.tileRow / 3) * 100}%`;
+                return (
+                  <button
+                    key={item.photoCode}
+                    type="button"
+                    onClick={() => onPreviewExpression(item)}
+                    data-photo-code={item.photoCode}
+                    className={`text-left rounded-lg border p-2.5 flex items-start gap-2.5 transition-colors cursor-pointer ${
+                      isSelected
+                        ? 'bg-sky-950/70 border-sky-400'
+                        : 'bg-slate-950/80 border-slate-800 hover:border-sky-500/60'
+                    }`}
+                  >
+                    <div
+                      aria-hidden="true"
+                      className="w-12 h-12 rounded-lg shrink-0 border border-slate-700 bg-[#0c111d] bg-no-repeat"
+                      style={{
+                        backgroundImage: `url("${resolveAssetUrl(item.atlasUrl)}")`,
+                        backgroundSize: '400% 400%',
+                        backgroundPosition: `${bgPosX} ${bgPosY}`,
+                      }}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-1 text-[11px]">
+                        <span className="font-mono font-semibold text-sky-300">{item.photoCode}</span>
+                        <span className="font-mono text-amber-300">{item.ipa} · {item.visemeId}</span>
+                      </div>
+                      <p className="text-xs font-semibold text-white truncate mt-0.5">
+                        {item.sampleWord} · {item.mood}
+                      </p>
+                      <p className="text-[11px] text-slate-400 line-clamp-2 mt-0.5 leading-snug">
+                        {item.articulatoryCueKo}
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* 10+ Dialogue Turns Panel for the Active Scenario */}
         {showDialogues && (

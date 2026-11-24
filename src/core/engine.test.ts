@@ -130,3 +130,66 @@ test('5 human tutors each have 50 distinct gestures (250 total)', () => {
     assert.equal(resolved.tutorId, tutor.id);
   }
 });
+
+import {
+  englishWordToVisemes,
+  findVisemeTimeForCharIndex,
+  sampleVisemePlaybackState,
+  VISEME_SHAPES,
+} from './viseme';
+import { TUTOR_EXPRESSION_PHOTOS_260, getTutorExpressionPhotos } from '../data/tutorExpressionPhotos';
+
+test('English G2P accurately models silent letters, diphthongs, interdentals, and bilabials', () => {
+  // "know" -> silent k & w -> nn + O + U (no initial kk)
+  const knowUnits = englishWordToVisemes('know');
+  assert.equal(knowUnits[0].v, 'nn');
+  assert.ok(!knowUnits.some((u) => u.v === 'kk'), 'silent k in "know" must not emit kk');
+
+  // "would" -> silent l -> U + U + DD (no nn/l)
+  const wouldUnits = englishWordToVisemes('would');
+  assert.equal(wouldUnits[0].v, 'U');
+  assert.equal(wouldUnits[wouldUnits.length - 1].v, 'DD');
+  assert.ok(!wouldUnits.some((u) => u.v === 'nn'), 'silent l in "would" must not emit nn');
+
+  // "night" -> silent gh -> nn + aa + I + DD (no kk)
+  const nightUnits = englishWordToVisemes('night');
+  assert.equal(nightUnits[0].v, 'nn');
+  assert.ok(!nightUnits.some((u) => u.v === 'kk'), 'silent gh in "night" must not emit kk');
+
+  // "thank" -> TH (tongueTip > 0.8)
+  const thankUnits = englishWordToVisemes('thank');
+  assert.equal(thankUnits[0].v, 'TH');
+  assert.ok(VISEME_SHAPES.TH.tongueTip > 0.8);
+
+  // "please" -> PP (lipPress > 0.9) -> nn -> I (lipWidth > 0.8) -> SS
+  const pleaseUnits = englishWordToVisemes('please');
+  assert.equal(pleaseUnits[0].v, 'PP');
+  assert.ok(VISEME_SHAPES.PP.lipPress > 0.9);
+  assert.ok(pleaseUnits.some((u) => u.v === 'I'));
+  assert.ok(VISEME_SHAPES.I.lipWidth > 0.8);
+});
+
+test('findVisemeTimeForCharIndex and sampleVisemePlaybackState sync words and atlas crossfades', () => {
+  const sentence = 'Thank you, please!';
+  const frames = generateVisemeTimeline(sentence, 1.0);
+
+  const pleaseIdx = sentence.indexOf('please');
+  const tPlease = findVisemeTimeForCharIndex(frames, pleaseIdx);
+  assert.ok(typeof tPlease === 'number' && tPlease > 0);
+
+  const sample = sampleVisemePlaybackState(frames, tPlease);
+  assert.equal(sample.primaryViseme, 'PP');
+  assert.ok(sample.expressionCode.startsWith('M'));
+});
+
+test('Each of 5 tutors has 52 Gemini Banana expression photos (260 total >= 50 per person)', () => {
+  assert.equal(TUTOR_EXPRESSION_PHOTOS_260.length, 260);
+  for (const tutor of TUTOR_PROFILES) {
+    const photos = getTutorExpressionPhotos(tutor.id);
+    assert.ok(photos.length >= 50, `${tutor.id} must have >= 50 photos/expressions`);
+    assert.equal(photos.length, 52);
+    assert.equal(new Set(photos.map((p) => p.photoCode)).size, 52);
+    assert.ok(photos.every((p) => p.atlasUrl === tutor.visemeAtlasUrl));
+  }
+});
+

@@ -2,10 +2,17 @@ import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import type { GestureDefinition, TutorMood, TutorProfile, VisemeFrame } from '../core/types';
+import type {
+  GestureDefinition,
+  TutorExpressionPhoto,
+  TutorMood,
+  TutorProfile,
+  VisemeFrame,
+} from '../core/types';
 import { resolveAssetUrl } from '../core/androidBridge';
 import { TUTOR_PROFILES } from '../data/seedData';
-import { sampleVisemeAt } from '../core/viseme';
+import { sampleVisemePlaybackState, VISEME_ATLAS_COORDS } from '../core/viseme';
+import { buildAlignedVisemeAtlas, type AlignedAtlasResult } from '../core/atlasAligner';
 
 // Pre-allocated scratch objects (Zero GC inside render loop)
 const _vecA = new THREE.Vector3();
@@ -15,6 +22,7 @@ export interface PlaybackTimeline {
   startedAtMs: number;
   frames: VisemeFrame[];
   active: boolean;
+  audioElement?: HTMLAudioElement | null;
 }
 
 interface TutorStage3DProps {
@@ -27,6 +35,7 @@ interface TutorStage3DProps {
   fallback2D: boolean;
   onWebGlLost: () => void;
   cameraPreset: 'portrait' | 'desk' | 'side';
+  previewExpression?: TutorExpressionPhoto | null;
 }
 
 function createStudioDeskTexture(): THREE.CanvasTexture {
@@ -91,41 +100,35 @@ function createContactShadowTexture(): THREE.CanvasTexture {
 }
 
 /**
- * Sculpts a subdivided portrait plane into a genuine 3D studio bust relief
- * (forehead, nose bridge, cheeks, jawline, neck, and shoulders project in Z)
- * so 3-point studio lighting and OrbitControls produce real 3D parallax.
+ * Sculpts a subdivided bust plane into a 3D studio relief so 3-point lighting & OrbitControls
+ * produce natural depth & parallax while displaying real aligned Gemini Banana portrait frames.
  */
 function createSculptedBustGeometry(size = 1.38, segments = 56): THREE.PlaneGeometry {
   const geo = new THREE.PlaneGeometry(size, size, segments, segments);
   const pos = geo.attributes.position as THREE.BufferAttribute;
 
   for (let i = 0; i < pos.count; i++) {
-    const nx = pos.getX(i) / (size * 0.5); // -1..1
-    const ny = pos.getY(i) / (size * 0.5); // -1..1
+    const nx = pos.getX(i) / (size * 0.5);
+    const ny = pos.getY(i) / (size * 0.5);
 
-    // Head & face relief centered at (0, 0.34) matching chest-up idol framing
     const faceDx = nx / 0.28;
     const faceDy = (ny - 0.34) / 0.34;
     const faceDistSq = faceDx * faceDx + faceDy * faceDy;
     const faceRelief = 0.095 * Math.exp(-faceDistSq * 1.2);
 
-    // Subtle nose projection
     const noseDx = nx / 0.07;
     const noseDy = (ny - 0.32) / 0.095;
     const noseRelief = 0.022 * Math.exp(-(noseDx * noseDx + noseDy * noseDy) * 1.5);
 
-    // Neck bridge
     const neckDx = nx / 0.14;
     const neckDy = (ny - 0.02) / 0.18;
     const neckRelief = 0.055 * Math.exp(-(neckDx * neckDx + neckDy * neckDy) * 1.4);
 
-    // Upper torso & tailored shoulders
     const torsoDx = nx / 0.56;
     const torsoDy = (ny + 0.45) / 0.44;
     const torsoRelief = 0.11 * Math.exp(-(torsoDx * torsoDx + torsoDy * torsoDy) * 1.05);
 
-    const z = faceRelief + noseRelief + neckRelief + torsoRelief;
-    pos.setZ(i, z);
+    pos.setZ(i, faceRelief + noseRelief + neckRelief + torsoRelief);
   }
 
   pos.needsUpdate = true;
@@ -134,15 +137,12 @@ function createSculptedBustGeometry(size = 1.38, segments = 56): THREE.PlaneGeom
 }
 
 interface FacialRigUniforms {
-  uMouthUV: { value: THREE.Vector2 };
   uLeftEyeUV: { value: THREE.Vector2 };
   uRightEyeUV: { value: THREE.Vector2 };
-  uJawOpen: { value: number };
-  uLipWidth: { value: number };
-  uLipRound: { value: number };
-  uSmile: { value: number };
+  uTileA: { value: THREE.Vector2 };
+  uTileB: { value: THREE.Vector2 };
+  uTileMix: { value: number };
   uBlink: { value: number };
-  uBrowLift: { value: number };
   uHeadPitch: { value: number };
   uHeadYaw: { value: number };
   uHeadRoll: { value: number };
@@ -158,6 +158,7 @@ export function TutorStage3D({
   fallback2D,
   onWebGlLost,
   cameraPreset,
+  previewExpression = null,
 }: TutorStage3DProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
 
@@ -167,6 +168,7 @@ export function TutorStage3D({
   const gestureTimeRef = useRef(performance.now());
   const isSpeakingRef = useRef(isSpeaking);
   const cameraPresetRef = useRef(cameraPreset);
+  const previewExpRef = useRef(previewExpression);
   const onWebGlLostRef = useRef(onWebGlLost);
 
   tutorRef.current = tutor;
@@ -174,6 +176,7 @@ export function TutorStage3D({
   gestureDefRef.current = activeGestureDef;
   isSpeakingRef.current = isSpeaking;
   cameraPresetRef.current = cameraPreset;
+  previewExpRef.current = previewExpression;
   onWebGlLostRef.current = onWebGlLost;
 
   useEffect(() => {
@@ -211,7 +214,7 @@ export function TutorStage3D({
     }
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.06;
+    renderer.toneMappingExposure = 1.05;
     renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
     renderer.setSize(width, height);
     renderer.shadowMap.enabled = !isSoftwareGl;
@@ -254,11 +257,10 @@ export function TutorStage3D({
       userInteracting = true;
     });
 
-    // 3-Point Studio Lighting Rig
     const hemiLight = new THREE.HemisphereLight(0xdbeafe, 0x1e293b, 0.95);
     scene.add(hemiLight);
 
-    const keyLight = new THREE.DirectionalLight(0xfff4e6, 1.45);
+    const keyLight = new THREE.DirectionalLight(0xfff4e6, 1.4);
     keyLight.position.set(1.8, 2.7, 2.5);
     keyLight.castShadow = !isSoftwareGl;
     keyLight.shadow.mapSize.set(1024, 1024);
@@ -272,7 +274,7 @@ export function TutorStage3D({
     keyLight.shadow.normalBias = 0.02;
     scene.add(keyLight);
 
-    const rimLight = new THREE.DirectionalLight(0x7dd3fc, 1.1);
+    const rimLight = new THREE.DirectionalLight(0x7dd3fc, 1.05);
     rimLight.position.set(-2.0, 2.1, -1.8);
     scene.add(rimLight);
 
@@ -307,7 +309,6 @@ export function TutorStage3D({
     scene.add(backWall);
     disposables.push(wallTex, wallGeo, wallMat);
 
-    // Desk assembly
     const deskGroup = new THREE.Group();
     deskGroup.position.set(0, 0, 0.36);
 
@@ -359,16 +360,17 @@ export function TutorStage3D({
     });
     disposables.push(legGeo, brassMat);
 
-    // Ceramic Mug on desk
-    const mugProfile = [
-      new THREE.Vector2(0, 0),
-      new THREE.Vector2(0.036, 0),
-      new THREE.Vector2(0.04, 0.085),
-      new THREE.Vector2(0.034, 0.085),
-      new THREE.Vector2(0.031, 0.01),
-      new THREE.Vector2(0, 0.01),
-    ];
-    const mugGeo = new THREE.LatheGeometry(mugProfile, 20);
+    const mugGeo = new THREE.LatheGeometry(
+      [
+        new THREE.Vector2(0, 0),
+        new THREE.Vector2(0.036, 0),
+        new THREE.Vector2(0.04, 0.085),
+        new THREE.Vector2(0.034, 0.085),
+        new THREE.Vector2(0.031, 0.01),
+        new THREE.Vector2(0, 0.01),
+      ],
+      20,
+    );
     const mugMat = new THREE.MeshStandardMaterial({
       color: 0xe2e8f0,
       roughness: 0.16,
@@ -380,7 +382,6 @@ export function TutorStage3D({
     deskGroup.add(mug);
     disposables.push(mugGeo, mugMat);
 
-    // Notebook on desk
     const bookGeo = new THREE.BoxGeometry(0.22, 0.018, 0.28);
     const bookMat = new THREE.MeshStandardMaterial({
       color: 0x1e293b,
@@ -394,7 +395,6 @@ export function TutorStage3D({
     deskGroup.add(notebook);
     disposables.push(bookGeo, bookMat);
 
-    // Studio Lamp
     const lampShadeGeo = new THREE.LatheGeometry(
       [
         new THREE.Vector2(0.02, 0),
@@ -420,7 +420,6 @@ export function TutorStage3D({
     deskGroup.add(lampStem);
     disposables.push(lampShadeGeo, lampMat, lampStemGeo);
 
-    // Contact shadow plane on floor
     const shadowTex = createContactShadowTexture();
     const shadowPlaneGeo = new THREE.CircleGeometry(1.35, 32);
     const shadowPlaneMat = new THREE.MeshBasicMaterial({
@@ -437,55 +436,81 @@ export function TutorStage3D({
     disposables.push(shadowTex, shadowPlaneGeo, shadowPlaneMat);
 
     // =========================================================================
-    // PHOTOREALISTIC 3D HUMAN STUDIO BUST + GLSL REAL-TIME FACIAL RIG
+    // PHOTOREALISTIC GEMINI BANANA 4x4 VISEME & EXPRESSION ATLAS BUST
+    // Zero UV mouth warping, zero flat overlays — pure aligned frame blending!
     // =========================================================================
-    const textureLoader = new THREE.TextureLoader();
-    textureLoader.setCrossOrigin('anonymous');
-    const tutorTextures = new Map<string, THREE.Texture>();
+    const tutorAtlasTextures = new Map<string, THREE.Texture>();
 
-    const configureAndLoadTexture = (profile: TutorProfile): THREE.Texture => {
-      const existing = tutorTextures.get(profile.id);
+    // Placeholder 1x1 dark studio canvas while atlas finishes loading
+    const placeholderCanvas = document.createElement('canvas');
+    placeholderCanvas.width = 4;
+    placeholderCanvas.height = 4;
+    const pCtx = placeholderCanvas.getContext('2d');
+    if (pCtx) {
+      pCtx.fillStyle = '#0c111d';
+      pCtx.fillRect(0, 0, 4, 4);
+    }
+    const placeholderTex = new THREE.CanvasTexture(placeholderCanvas);
+    placeholderTex.colorSpace = THREE.SRGBColorSpace;
+    disposables.push(placeholderTex);
+
+    const loadTutorAtlasTexture = (profile: TutorProfile): THREE.Texture => {
+      const existing = tutorAtlasTextures.get(profile.id);
       if (existing) return existing;
-      const tex = textureLoader.load(resolveAssetUrl(profile.portraitUrl), () => {
-        if (disposed) return;
-        tex.needsUpdate = true;
-        bustMat.needsUpdate = true;
-        if (container) {
-          container.dataset.textureReady = 'true';
-        }
-        renderer.render(scene, camera);
-      });
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.anisotropy = isSoftwareGl ? 1 : maxAniso;
-      tex.generateMipmaps = !isSoftwareGl;
-      tex.minFilter = isSoftwareGl ? THREE.LinearFilter : THREE.LinearMipmapLinearFilter;
-      tex.magFilter = THREE.LinearFilter;
-      tutorTextures.set(profile.id, tex);
-      disposables.push(tex);
-      return tex;
+
+      // Return placeholder immediately until aligned atlas texture is allocated at full dimensions
+      if (!tutorAtlasTextures.has(`__loading_${profile.id}`)) {
+        tutorAtlasTextures.set(`__loading_${profile.id}`, placeholderTex);
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          if (disposed) return;
+          const aligned = buildAlignedVisemeAtlas(img);
+          const alignedTex = new THREE.CanvasTexture(aligned.canvas);
+          alignedTex.colorSpace = THREE.SRGBColorSpace;
+          alignedTex.anisotropy = isSoftwareGl ? 1 : maxAniso;
+          alignedTex.generateMipmaps = false;
+          alignedTex.minFilter = THREE.LinearFilter;
+          alignedTex.magFilter = THREE.LinearFilter;
+          alignedTex.wrapS = THREE.ClampToEdgeWrapping;
+          alignedTex.wrapT = THREE.ClampToEdgeWrapping;
+          alignedTex.needsUpdate = true;
+
+          tutorAtlasTextures.set(profile.id, alignedTex);
+          disposables.push(alignedTex);
+
+          if (tutorRef.current.id === profile.id) {
+            bustMat.map = alignedTex;
+            bustMat.needsUpdate = true;
+            if (container) {
+              container.dataset.textureReady = 'true';
+            }
+            renderer.render(scene, camera);
+          }
+        };
+        img.src = resolveAssetUrl(profile.visemeAtlasUrl);
+      }
+
+      return placeholderTex;
     };
 
-    // Load active tutor texture immediately first; preload remaining 4 shortly after
-    const initialTex = configureAndLoadTexture(tutorRef.current);
+    const initialTex = loadTutorAtlasTexture(tutorRef.current);
     const preloadTimer = window.setTimeout(() => {
       if (disposed) return;
       for (const profile of TUTOR_PROFILES) {
         if (profile.id !== tutorRef.current.id) {
-          configureAndLoadTexture(profile);
+          loadTutorAtlasTexture(profile);
         }
       }
     }, 350);
 
     const rigUniforms: FacialRigUniforms = {
-      uMouthUV: { value: new THREE.Vector2(...tutorRef.current.facialAnchors.mouthUV) },
       uLeftEyeUV: { value: new THREE.Vector2(...tutorRef.current.facialAnchors.leftEyeUV) },
       uRightEyeUV: { value: new THREE.Vector2(...tutorRef.current.facialAnchors.rightEyeUV) },
-      uJawOpen: { value: 0 },
-      uLipWidth: { value: 0.3 },
-      uLipRound: { value: 0 },
-      uSmile: { value: 0.25 },
+      uTileA: { value: new THREE.Vector2(0, 0) },
+      uTileB: { value: new THREE.Vector2(3, 3) },
+      uTileMix: { value: 0.35 },
       uBlink: { value: 0 },
-      uBrowLift: { value: 0 },
       uHeadPitch: { value: 0 },
       uHeadYaw: { value: 0 },
       uHeadRoll: { value: 0 },
@@ -498,7 +523,7 @@ export function TutorStage3D({
       metalness: 0.0,
       transparent: true,
     });
-    bustMat.customProgramCacheKey = () => 'photoreal-human-tutor-rig-v1';
+    bustMat.customProgramCacheKey = () => 'gemini-banana-viseme-atlas-rig-v2';
 
     bustMat.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, rigUniforms);
@@ -514,7 +539,6 @@ export function TutorStage3D({
         .replace(
           '#include <begin_vertex>',
           `#include <begin_vertex>
-          // Articulate neck & head independently from grounded shoulders
           float headMask = smoothstep(-0.04, 0.24, transformed.y);
           vec3 pivot = vec3(0.0, 0.02, 0.02);
           vec3 rel = transformed - pivot;
@@ -538,69 +562,48 @@ export function TutorStage3D({
         .replace(
           '#include <common>',
           `#include <common>
-          uniform vec2 uMouthUV;
           uniform vec2 uLeftEyeUV;
           uniform vec2 uRightEyeUV;
-          uniform float uJawOpen;
-          uniform float uLipWidth;
-          uniform float uLipRound;
-          uniform float uSmile;
+          uniform vec2 uTileA;
+          uniform vec2 uTileB;
+          uniform float uTileMix;
           uniform float uBlink;
-          uniform float uBrowLift;`,
+
+          vec2 atlasCoord(vec2 localUv, vec2 tile) {
+            // Clamp 1.6% inset inside each 4x4 cell to avoid bleeding across cell boundaries
+            vec2 safeLocal = clamp(localUv, vec2(0.016), vec2(0.984));
+            return vec2(tile.x * 0.25, (3.0 - tile.y) * 0.25) + safeLocal * 0.25;
+          }`,
         )
         .replace(
           '#include <map_fragment>',
           `#ifdef USE_MAP
-            vec2 animUv = vMapUv;
+            vec2 localUv = vMapUv;
 
-            // 1. Expressive natural viseme lip-sync around uMouthUV
-            vec2 mDelta = animUv - uMouthUV;
-            float jawMask = exp(-((mDelta.x * mDelta.x) / 0.0020 + (mDelta.y * mDelta.y) / 0.0011));
-            float lowerLipWeight = smoothstep(0.006, -0.020, mDelta.y) * jawMask;
-            float upperLipWeight = smoothstep(-0.004, 0.015, mDelta.y) * jawMask;
-            animUv.y += lowerLipWeight * (uJawOpen * 0.032);
-            animUv.y -= upperLipWeight * (uJawOpen * 0.009);
+            // Gentle natural eye-lid closure ONLY around eyes (zero mouth UV distortion!)
+            vec2 lDelta = localUv - uLeftEyeUV;
+            vec2 rDelta = localUv - uRightEyeUV;
+            float lEyeMask = exp(-((lDelta.x * lDelta.x) / 0.0007 + (lDelta.y * lDelta.y) / 0.00022));
+            float rEyeMask = exp(-((rDelta.x * rDelta.x) / 0.0007 + (rDelta.y * rDelta.y) / 0.00022));
+            float lLidFactor = smoothstep(-0.004, 0.008, lDelta.y) * lEyeMask;
+            float rLidFactor = smoothstep(-0.004, 0.008, rDelta.y) * rEyeMask;
+            localUv.y += (lLidFactor + rLidFactor) * uBlink * 0.009;
 
-            float lipRegion = exp(-((mDelta.x * mDelta.x) / 0.0016 + (mDelta.y * mDelta.y) / 0.00055));
-            animUv.x -= mDelta.x * lipRegion * ((uLipRound * 0.18) - (uLipWidth * 0.08));
+            vec4 texA = texture2D(map, atlasCoord(localUv, uTileA));
+            vec4 texB = texture2D(map, atlasCoord(localUv, uTileB));
 
-            // Subtle natural smile corner lift
-            float cornerDist = smoothstep(0.01, 0.032, abs(mDelta.x)) * exp(-((mDelta.x * mDelta.x) / 0.0015 + (mDelta.y * mDelta.y) / 0.0005));
-            animUv.y -= cornerDist * uSmile * 0.0065;
+            // Keep lower shoulders anchored to Tile A and crossfade face + jaw expression cleanly
+            float faceBlendRegion = smoothstep(0.16, 0.36, vMapUv.y);
+            float effectiveMix = clamp(uTileMix, 0.0, 1.0) * faceBlendRegion;
+            vec4 sampledDiffuseColor = mix(texA, texB, effectiveMix);
 
-            // 2. Soft natural blinking around both eyes
-            vec2 lDelta = animUv - uLeftEyeUV;
-            vec2 rDelta = animUv - uRightEyeUV;
-            float lEyeMask = exp(-((lDelta.x * lDelta.x) / 0.00058 + (lDelta.y * lDelta.y) / 0.00019));
-            float rEyeMask = exp(-((rDelta.x * rDelta.x) / 0.00058 + (rDelta.y * rDelta.y) / 0.00019));
-            float lLidFactor = smoothstep(-0.005, 0.009, lDelta.y) * lEyeMask;
-            float rLidFactor = smoothstep(-0.005, 0.009, rDelta.y) * rEyeMask;
-            animUv.y += (lLidFactor + rLidFactor) * uBlink * 0.011;
-
-            // 3. Subtle eyebrow lift
-            vec2 lbDelta = animUv - (uLeftEyeUV + vec2(0.0, 0.022));
-            vec2 rbDelta = animUv - (uRightEyeUV + vec2(0.0, 0.022));
-            float browMask = exp(-((lbDelta.x * lbDelta.x) / 0.0008 + (lbDelta.y * lbDelta.y) / 0.00024))
-                           + exp(-((rbDelta.x * rbDelta.x) / 0.0008 + (rbDelta.y * rbDelta.y) / 0.00024));
-            animUv.y -= browMask * uBrowLift * 0.0065;
-
-            vec4 sampledDiffuseColor = texture2D( map, clamp(animUv, 0.002, 0.998) );
-
-            // Natural oral-cavity depth + subtle teeth highlight when speaking
-            float apertureY = max(0.0018, uJawOpen * 0.0165);
-            float apertureX = mix(0.024, 0.016, uLipRound);
-            float mouthSlit = (mDelta.x * mDelta.x) / (apertureX * apertureX)
-                            + ((mDelta.y + uJawOpen * 0.005) * (mDelta.y + uJawOpen * 0.005)) / (apertureY * apertureY);
-            float cavityMask = (1.0 - smoothstep(0.42, 1.0, mouthSlit)) * smoothstep(0.06, 0.30, uJawOpen);
-            sampledDiffuseColor.rgb = mix(sampledDiffuseColor.rgb, vec3(0.15, 0.045, 0.05), cavityMask * 0.78);
-
-            // Soft lash line during full blink
-            float blinkLine = (lEyeMask + rEyeMask) * smoothstep(0.5, 0.96, uBlink);
-            sampledDiffuseColor.rgb = mix(sampledDiffuseColor.rgb, sampledDiffuseColor.rgb * 0.58, blinkLine * 0.52);
+            // Subtle natural lash line at full blink peak
+            float blinkLine = (lEyeMask + rEyeMask) * smoothstep(0.55, 0.96, uBlink);
+            sampledDiffuseColor.rgb = mix(sampledDiffuseColor.rgb, sampledDiffuseColor.rgb * 0.62, blinkLine * 0.45);
 
             diffuseColor *= sampledDiffuseColor;
 
-            // Seamless rectangular-feathered fade so the solid #0c111d studio portrait melts cleanly into the 3D studio
+            // Feathered vignette so studio portrait melts smoothly into the 3D scene
             vec2 edgeDist = abs(vMapUv - vec2(0.5, 0.5));
             float edgeX = 1.0 - smoothstep(0.38, 0.495, edgeDist.x);
             float edgeTop = 1.0 - smoothstep(0.38, 0.495, vMapUv.y - 0.5);
@@ -625,12 +628,6 @@ export function TutorStage3D({
       renderer.compile(scene, camera);
     }
 
-    // Track current smoothly damped animation states
-    let curJaw = 0;
-    let curLipRound = 0;
-    let curLipWidth = 0.25;
-    let curSmile = 0.25;
-    let curBrowLift = 0;
     let curPitch = 0;
     let curYaw = 0;
     let curRoll = 0;
@@ -638,6 +635,7 @@ export function TutorStage3D({
     let curBounceY = 0;
     let curSwayX = 0;
     let curZoomDelta = 0;
+    let curHappyBlend = 0.25;
     let nextBlinkAt = performance.now() + 2400;
     let blinkProgress = 0;
     let lastTutorId = tutorRef.current.id;
@@ -667,15 +665,11 @@ export function TutorStage3D({
     function updateScene(dt: number, elapsed: number, nowMs: number) {
       const activeTutor = tutorRef.current;
 
-      // Instantaneous texture & facial anchor swap across the 5 tutors
       if (activeTutor.id !== lastTutorId) {
         lastTutorId = activeTutor.id;
-        const nextTex = configureAndLoadTexture(activeTutor);
-        if (nextTex) {
-          bustMat.map = nextTex;
-          bustMat.needsUpdate = true;
-        }
-        rigUniforms.uMouthUV.value.set(...activeTutor.facialAnchors.mouthUV);
+        const nextTex = loadTutorAtlasTexture(activeTutor);
+        bustMat.map = nextTex;
+        bustMat.needsUpdate = true;
         rigUniforms.uLeftEyeUV.value.set(...activeTutor.facialAnchors.leftEyeUV);
         rigUniforms.uRightEyeUV.value.set(...activeTutor.facialAnchors.rightEyeUV);
       }
@@ -696,34 +690,29 @@ export function TutorStage3D({
       const durSec = Math.max(0.8, k.durationMs / 1000);
       const gElapsed = (nowMs - gestureTimeRef.current) / 1000;
 
-      // Living idle sway, breathing + active speaking head cadence
       const activelyTalking = isSpeakingRef.current || playbackRef.current.active;
-      let targetPitch = Math.sin(elapsed * 1.1) * 0.036 + (activelyTalking ? Math.sin(elapsed * 5.2) * 0.038 : 0);
-      let targetYaw = Math.sin(elapsed * 0.68) * 0.048 + (activelyTalking ? Math.sin(elapsed * 2.7) * 0.04 : 0);
-      let targetRoll = Math.sin(elapsed * 0.52) * 0.024 + (activelyTalking ? Math.cos(elapsed * 3.1) * 0.025 : 0);
+      let targetPitch = Math.sin(elapsed * 1.1) * 0.036 + (activelyTalking ? Math.sin(elapsed * 5.2) * 0.036 : 0);
+      let targetYaw = Math.sin(elapsed * 0.68) * 0.048 + (activelyTalking ? Math.sin(elapsed * 2.7) * 0.038 : 0);
+      let targetRoll = Math.sin(elapsed * 0.52) * 0.024 + (activelyTalking ? Math.cos(elapsed * 3.1) * 0.022 : 0);
       let targetLeanZ = activelyTalking ? 0.018 : 0;
       let targetBounceY = Math.sin(elapsed * 1.85) * 0.008;
       let targetSwayX = 0;
       let targetZoomDelta = 0;
       let gestureSmileBoost = 0;
-      let gestureBrowBoost = 0;
-      let gestureJawPulse = 0;
 
       if (gElapsed < durSec) {
-        const phase = gElapsed / durSec; // 0..1
-        const env = Math.sin(phase * Math.PI); // Smooth bell envelope
+        const phase = gElapsed / durSec;
+        const env = Math.sin(phase * Math.PI);
         const osc = Math.sin(gElapsed * k.freqHz * Math.PI * 2);
 
         targetPitch += (k.headPitch * 0.75 + k.headPitch * 0.65 * osc) * env;
-        targetYaw += (k.headYaw * 1.25 * (Math.abs(osc) > 0 ? osc : 1)) * env;
+        targetYaw += k.headYaw * 1.25 * (Math.abs(osc) > 0 ? osc : 1) * env;
         targetRoll += k.headRoll * 1.2 * env;
         targetLeanZ += k.leanZ * 1.25 * env;
         targetBounceY += k.bounceY * 1.3 * Math.abs(osc) * env;
         targetSwayX += k.swayX * 1.25 * osc * env;
         targetZoomDelta += k.zoomDelta * env;
         gestureSmileBoost = k.smileBoost * env;
-        gestureBrowBoost = k.browLift * env;
-        gestureJawPulse = k.jawPulse * Math.max(0, osc) * env;
       }
 
       const kinDamp = 1 - Math.exp(-8.5 * dt);
@@ -735,14 +724,12 @@ export function TutorStage3D({
       curSwayX = THREE.MathUtils.lerp(curSwayX, targetSwayX, kinDamp);
       curZoomDelta = THREE.MathUtils.lerp(curZoomDelta, targetZoomDelta, kinDamp);
 
-      // Apply torso kinematics to bustPivot & independent head kinematics to vertex shader
       bustPivot.position.set(curSwayX, 1.18 + curBounceY, -0.14 + curLeanZ);
       bustPivot.rotation.set(curPitch * 0.22, curYaw * 0.25, curRoll * 0.2);
       rigUniforms.uHeadPitch.value = curPitch * 0.72;
       rigUniforms.uHeadYaw.value = curYaw * 0.68;
       rigUniforms.uHeadRoll.value = curRoll * 0.74;
 
-      // Camera preset + subtle gesture zoom breathing + mobile portrait framing
       const isNarrow = camera.aspect < 0.85;
       const mobileZ = isNarrow ? 0.52 : 0;
       const mobileTargetY = isNarrow ? -0.16 : 0;
@@ -752,13 +739,13 @@ export function TutorStage3D({
       }
       if (!userInteracting) {
         if (cameraPresetRef.current === 'portrait') {
-          _vecA.set(0, 1.40, 1.48 + mobileZ + curZoomDelta);
+          _vecA.set(0, 1.4, 1.48 + mobileZ + curZoomDelta);
           _vecB.set(0, 1.28 + mobileTargetY, -0.05);
         } else if (cameraPresetRef.current === 'desk') {
-          _vecA.set(0.32, 1.50, 2.24 + mobileZ * 0.6 + curZoomDelta);
+          _vecA.set(0.32, 1.5, 2.24 + mobileZ * 0.6 + curZoomDelta);
           _vecB.set(0, 1.16 + mobileTargetY, 0.08);
         } else {
-          _vecA.set(-0.56, 1.40, 1.62 + mobileZ + curZoomDelta);
+          _vecA.set(-0.56, 1.4, 1.62 + mobileZ + curZoomDelta);
           _vecB.set(0, 1.27 + mobileTargetY, -0.05);
         }
         const dampAlpha = 1 - Math.exp(-5 * dt);
@@ -767,61 +754,75 @@ export function TutorStage3D({
       }
       controls.update();
 
-      // Mood + gesture smile & brow targets
-      let targetSmile = 0.2;
-      let targetBrowLift = 0.05;
+      // Mood & real Gemini Banana tile selection
       const activeMood = moodRef.current;
-      if (activeMood === 'happy') {
-        targetSmile = 0.75;
-        targetBrowLift = 0.25;
-      } else if (activeMood === 'encouraging') {
-        targetSmile = 0.55;
-        targetBrowLift = 0.18;
-      } else if (activeMood === 'thinking') {
-        targetSmile = -0.05;
-        targetBrowLift = 0.12;
-      } else if (activeMood === 'surprised') {
-        targetSmile = 0.35;
-        targetBrowLift = 0.65;
-      }
-
-      const moodAlpha = 1 - Math.exp(-8 * dt);
-      curSmile = THREE.MathUtils.lerp(curSmile, Math.min(1, targetSmile + gestureSmileBoost * 0.5), moodAlpha);
-      curBrowLift = THREE.MathUtils.lerp(curBrowLift, Math.min(1, targetBrowLift + gestureBrowBoost * 0.6), moodAlpha);
-      rigUniforms.uSmile.value = curSmile;
-      rigUniforms.uBrowLift.value = curBrowLift;
-
-      // Viseme Lip-Sync Sampling
-      let targetJaw = gestureJawPulse;
-      let targetRound = 0;
-      let targetWidth = 0.25 + curSmile * 0.3;
+      let idleHappyTarget = 0.28;
+      if (activeMood === 'happy') idleHappyTarget = 0.88;
+      else if (activeMood === 'encouraging') idleHappyTarget = 0.56;
+      else if (activeMood === 'thinking') idleHappyTarget = 0.0;
+      else if (activeMood === 'surprised') idleHappyTarget = 0.45;
+      idleHappyTarget = Math.min(1, Math.max(0, idleHappyTarget + gestureSmileBoost * 0.35));
+      curHappyBlend = THREE.MathUtils.lerp(curHappyBlend, idleHappyTarget, 1 - Math.exp(-6 * dt));
 
       const timeline = playbackRef.current;
+      const preview = previewExpRef.current;
+      let activeVisemeLabel = 'sil';
+      let activeExpCode = 'M50';
+
       if (timeline.active && timeline.frames.length > 0) {
-        const elapsedAudioMs = nowMs - timeline.startedAtMs;
+        const audioEl = timeline.audioElement;
+        const elapsedAudioMs =
+          audioEl && !audioEl.paused && audioEl.currentTime > 0
+            ? audioEl.currentTime * 1000
+            : nowMs - timeline.startedAtMs;
         const last = timeline.frames[timeline.frames.length - 1];
         if (elapsedAudioMs <= last.t + last.d + 150) {
-          const w = sampleVisemeAt(timeline.frames, elapsedAudioMs);
-          targetJaw = Math.max(targetJaw, w.jawOpen);
-          targetRound = w.lipRound;
-          targetWidth = Math.max(0.1, w.lipWidth);
+          const sample = sampleVisemePlaybackState(timeline.frames, elapsedAudioMs);
+          const coordA = VISEME_ATLAS_COORDS[sample.primaryViseme] ?? VISEME_ATLAS_COORDS.sil;
+          const coordB = VISEME_ATLAS_COORDS[sample.nextViseme] ?? coordA;
+          rigUniforms.uTileA.value.set(coordA.col, coordA.row);
+          rigUniforms.uTileB.value.set(coordB.col, coordB.row);
+          rigUniforms.uTileMix.value = sample.blendT;
+          activeVisemeLabel = sample.primaryViseme;
+          activeExpCode = sample.expressionCode;
         } else {
           timeline.active = false;
         }
+      } else if (preview) {
+        rigUniforms.uTileA.value.set(preview.tileCol, preview.tileRow);
+        rigUniforms.uTileB.value.set(preview.blendTileCol, preview.blendTileRow);
+        rigUniforms.uTileMix.value = preview.blendRatio;
+        activeVisemeLabel = preview.visemeId;
+        activeExpCode = preview.photoCode;
       } else if (isSpeakingRef.current) {
-        targetJaw = Math.max(targetJaw, 0.22 + Math.abs(Math.sin(elapsed * 14)) * 0.42);
-        targetRound = (Math.cos(elapsed * 9) + 1) * 0.25;
-        targetWidth = 0.45;
+        const cycle = ['aa', 'E', 'O', 'PP', 'I', 'TH', 'U'] as const;
+        const idx = Math.floor(elapsed * 8) % cycle.length;
+        const nextIdx = (idx + 1) % cycle.length;
+        const coordA = VISEME_ATLAS_COORDS[cycle[idx]];
+        const coordB = VISEME_ATLAS_COORDS[cycle[nextIdx]];
+        rigUniforms.uTileA.value.set(coordA.col, coordA.row);
+        rigUniforms.uTileB.value.set(coordB.col, coordB.row);
+        rigUniforms.uTileMix.value = (elapsed * 8) % 1;
+        activeVisemeLabel = cycle[idx];
+      } else {
+        // Idle breathing expression: crossfade cleanly between resting neutral (0,0) and happy/surprised tile
+        const idleSecondary =
+          activeMood === 'surprised' ? VISEME_ATLAS_COORDS.E : VISEME_ATLAS_COORDS.happy;
+        rigUniforms.uTileA.value.set(0, 0);
+        rigUniforms.uTileB.value.set(idleSecondary.col, idleSecondary.row);
+        rigUniforms.uTileMix.value = curHappyBlend;
+        activeVisemeLabel = 'sil';
+        activeExpCode = activeMood === 'happy' ? 'E51' : activeMood === 'thinking' ? 'E52' : 'M50';
       }
 
-      const visemeDamp = 1 - Math.exp(-26 * dt);
-      curJaw = THREE.MathUtils.lerp(curJaw, targetJaw, visemeDamp);
-      curLipRound = THREE.MathUtils.lerp(curLipRound, targetRound, visemeDamp);
-      curLipWidth = THREE.MathUtils.lerp(curLipWidth, targetWidth, visemeDamp);
-
-      rigUniforms.uJawOpen.value = curJaw;
-      rigUniforms.uLipRound.value = curLipRound;
-      rigUniforms.uLipWidth.value = curLipWidth;
+      if (container) {
+        if (container.dataset.viseme !== activeVisemeLabel) {
+          container.dataset.viseme = activeVisemeLabel;
+        }
+        if (container.dataset.expression !== activeExpCode) {
+          container.dataset.expression = activeExpCode;
+        }
+      }
     }
 
     function tick() {
@@ -877,10 +878,12 @@ export function TutorStage3D({
     return (
       <Animated2DFallbackStage
         tutor={tutor}
+        mood={mood}
         activeGestureDef={activeGestureDef}
         gestureNonce={gestureNonce}
         isSpeaking={isSpeaking}
         playbackRef={playbackRef}
+        previewExpression={previewExpression}
       />
     );
   }
@@ -896,30 +899,55 @@ export function TutorStage3D({
 
 function Animated2DFallbackStage({
   tutor,
+  mood,
   activeGestureDef,
   gestureNonce,
   isSpeaking,
   playbackRef,
+  previewExpression = null,
 }: {
   tutor: TutorProfile;
+  mood: TutorMood;
   activeGestureDef: GestureDefinition;
   gestureNonce: number;
   isSpeaking: boolean;
   playbackRef: React.MutableRefObject<PlaybackTimeline>;
+  previewExpression?: TutorExpressionPhoto | null;
 }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const cardRef = useRef<HTMLDivElement | null>(null);
-  const mouthRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const alignedAtlasRef = useRef<AlignedAtlasResult | null>(null);
   const barsRef = useRef<HTMLSpanElement[]>([]);
   const gestureStartRef = useRef(performance.now());
   const gestureRef = useRef(activeGestureDef);
   const isSpeakingRef = useRef(isSpeaking);
+  const moodRef = useRef(mood);
+  const previewRef = useRef(previewExpression);
 
   gestureRef.current = activeGestureDef;
   isSpeakingRef.current = isSpeaking;
+  moodRef.current = mood;
+  previewRef.current = previewExpression;
 
   useEffect(() => {
     gestureStartRef.current = performance.now();
   }, [activeGestureDef.id, gestureNonce]);
+
+  useEffect(() => {
+    let cancelled = false;
+    alignedAtlasRef.current = null;
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      if (cancelled) return;
+      alignedAtlasRef.current = buildAlignedVisemeAtlas(img);
+    };
+    img.src = resolveAssetUrl(tutor.visemeAtlasUrl);
+    return () => {
+      cancelled = true;
+    };
+  }, [tutor.visemeAtlasUrl]);
 
   useEffect(() => {
     let raf = 0;
@@ -946,43 +974,112 @@ function Animated2DFallbackStage({
         scale += g.leanZ * 0.35 * env;
       }
 
-      let jaw = 0;
+      let coordA = VISEME_ATLAS_COORDS.sil;
+      let coordB = VISEME_ATLAS_COORDS.happy;
+      let blendT = moodRef.current === 'happy' ? 0.85 : moodRef.current === 'encouraging' ? 0.5 : 0.15;
+      let jawEnergy = 0;
+      let activeVisemeLabel = 'sil';
+      let activeExpCode = 'M50';
+
       const tl = playbackRef.current;
+      const preview = previewRef.current;
+
       if (tl.active && tl.frames.length > 0) {
-        const audioMs = nowMs - tl.startedAtMs;
+        const audioEl = tl.audioElement;
+        const audioMs =
+          audioEl && !audioEl.paused && audioEl.currentTime > 0
+            ? audioEl.currentTime * 1000
+            : nowMs - tl.startedAtMs;
         const last = tl.frames[tl.frames.length - 1];
         if (audioMs <= last.t + last.d + 150) {
-          const w = sampleVisemeAt(tl.frames, audioMs);
-          jaw = w.jawOpen;
+          const sample = sampleVisemePlaybackState(tl.frames, audioMs);
+          coordA = VISEME_ATLAS_COORDS[sample.primaryViseme] ?? VISEME_ATLAS_COORDS.sil;
+          coordB = VISEME_ATLAS_COORDS[sample.nextViseme] ?? coordA;
+          blendT = sample.blendT;
+          jawEnergy = sample.weights.jawOpen;
+          activeVisemeLabel = sample.primaryViseme;
+          activeExpCode = sample.expressionCode;
         } else {
           tl.active = false;
         }
+      } else if (preview) {
+        coordA = { col: preview.tileCol, row: preview.tileRow };
+        coordB = { col: preview.blendTileCol, row: preview.blendTileRow };
+        blendT = preview.blendRatio;
+        jawEnergy = preview.jawOpen;
+        activeVisemeLabel = preview.visemeId;
+        activeExpCode = preview.photoCode;
       } else if (isSpeakingRef.current) {
-        jaw = 0.25 + Math.abs(Math.sin(elapsed * 13)) * 0.55;
+        const cycle = ['aa', 'E', 'O', 'PP', 'I', 'TH', 'U'] as const;
+        const idx = Math.floor(elapsed * 8) % cycle.length;
+        coordA = VISEME_ATLAS_COORDS[cycle[idx]];
+        coordB = VISEME_ATLAS_COORDS[cycle[(idx + 1) % cycle.length]];
+        blendT = (elapsed * 8) % 1;
+        jawEnergy = 0.45;
+        activeVisemeLabel = cycle[idx];
       }
 
-      if (jaw > 0.05) {
-        ty += Math.sin(elapsed * 6.5) * jaw * 2.5;
-        rot += Math.cos(elapsed * 3.2) * jaw * 1.2;
+      if (jawEnergy > 0.05) {
+        ty += Math.sin(elapsed * 6.5) * jawEnergy * 2.2;
+        rot += Math.cos(elapsed * 3.2) * jawEnergy * 1.1;
       }
 
       if (cardRef.current) {
         cardRef.current.style.transform = `translate3d(${tx.toFixed(2)}px, ${ty.toFixed(2)}px, 0) rotate(${rot.toFixed(2)}deg) scale(${scale.toFixed(4)})`;
       }
 
-      if (mouthRef.current) {
-        const openPx = Math.max(0, jaw * 12);
-        mouthRef.current.style.opacity = jaw > 0.08 ? String(Math.min(0.85, jaw * 0.95)) : '0';
-        mouthRef.current.style.transform = `translate(-50%, -50%) scaleY(${(0.35 + jaw * 1.35).toFixed(2)}) scaleX(${(0.85 + jaw * 0.2).toFixed(2)})`;
-        mouthRef.current.style.height = `${Math.max(4, openPx)}px`;
+      const canvas = canvasRef.current;
+      const atlas = alignedAtlasRef.current;
+      if (canvas && atlas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.globalAlpha = 1;
+          ctx.drawImage(
+            atlas.canvas,
+            coordA.col * atlas.tileW,
+            coordA.row * atlas.tileH,
+            atlas.tileW,
+            atlas.tileH,
+            0,
+            0,
+            canvas.width,
+            canvas.height,
+          );
+          if (blendT > 0.01) {
+            ctx.globalAlpha = Math.min(1, Math.max(0, blendT));
+            ctx.drawImage(
+              atlas.canvas,
+              coordB.col * atlas.tileW,
+              coordB.row * atlas.tileH,
+              atlas.tileW,
+              atlas.tileH,
+              0,
+              0,
+              canvas.width,
+              canvas.height,
+            );
+            ctx.globalAlpha = 1;
+          }
+        }
+      }
+
+      if (rootRef.current) {
+        if (rootRef.current.dataset.viseme !== activeVisemeLabel) {
+          rootRef.current.dataset.viseme = activeVisemeLabel;
+        }
+        if (rootRef.current.dataset.expression !== activeExpCode) {
+          rootRef.current.dataset.expression = activeExpCode;
+        }
       }
 
       const barHeights = [0.4, 0.75, 1.0, 0.65, 0.9, 0.5, 0.8, 0.45];
       barsRef.current.forEach((bar, idx) => {
         if (!bar) return;
-        const activeScale = jaw > 0.05 ? 0.28 + Math.abs(Math.sin(elapsed * 10 + idx * 0.8)) * barHeights[idx] : 0.16;
+        const activeScale =
+          jawEnergy > 0.05 ? 0.28 + Math.abs(Math.sin(elapsed * 10 + idx * 0.8)) * barHeights[idx] : 0.16;
         bar.style.height = `${Math.round(activeScale * 28)}px`;
-        bar.style.opacity = jaw > 0.05 ? '0.95' : '0.35';
+        bar.style.opacity = jawEnergy > 0.05 ? '0.95' : '0.35';
       });
 
       raf = requestAnimationFrame(animate);
@@ -992,11 +1089,9 @@ function Animated2DFallbackStage({
     return () => cancelAnimationFrame(raf);
   }, [playbackRef]);
 
-  const mouthLeftPct = `${(tutor.facialAnchors.mouthUV[0] * 100).toFixed(1)}%`;
-  const mouthTopPct = `${((1 - tutor.facialAnchors.mouthUV[1]) * 100).toFixed(1)}%`;
-
   return (
     <div
+      ref={rootRef}
       className="w-full h-full flex flex-col items-center justify-center bg-[#0c111d] px-4 py-4 overflow-hidden"
       data-testid="tutor-2d-fallback"
     >
@@ -1010,12 +1105,12 @@ function Animated2DFallbackStage({
           referrerPolicy="no-referrer"
           className="w-full h-full object-cover"
         />
-        {/* Animated mouth aperture aligned to tutor facial anchor */}
-        <div
-          ref={mouthRef}
+        <canvas
+          ref={canvasRef}
+          width={320}
+          height={320}
           aria-hidden="true"
-          className="absolute w-7 rounded-full bg-[#240a0d] blur-[1px] pointer-events-none opacity-0"
-          style={{ left: mouthLeftPct, top: mouthTopPct }}
+          className="absolute inset-0 w-full h-full object-cover pointer-events-none"
         />
         <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950/95 via-slate-950/50 to-transparent p-4">
           <p className="font-display text-lg font-semibold text-white">{tutor.name}</p>

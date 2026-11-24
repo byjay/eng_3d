@@ -1,4 +1,5 @@
-import type { VisemeFrame, VisemeId } from './types';
+import type { MouthExpression, VisemeFrame, VisemeId } from './types';
+import { VISEME_EXPRESSIONS_50 } from '../data/visemeExpressions';
 
 export interface VisemeWeights {
   jawOpen: number; // 0..1
@@ -6,42 +7,74 @@ export interface VisemeWeights {
   lipWidth: number; // 0..1
   lipPress: number; // 0..1
   tongueTip: number; // 0..1
+  teethVisible: number; // 0..1
+  cheekLift: number; // 0..1
 }
 
 /**
+ * Canonical 4x4 Gemini Banana viseme & expression atlas tile map (col 0..3, row 0..3).
+ */
+export const VISEME_ATLAS_COORDS: Record<VisemeId | 'happy', { col: number; row: number }> = {
+  sil: { col: 0, row: 0 },
+  PP: { col: 1, row: 0 },
+  FF: { col: 2, row: 0 },
+  TH: { col: 3, row: 0 },
+  DD: { col: 0, row: 1 },
+  kk: { col: 1, row: 1 },
+  CH: { col: 2, row: 1 },
+  SS: { col: 3, row: 1 },
+  nn: { col: 0, row: 2 },
+  RR: { col: 1, row: 2 },
+  aa: { col: 2, row: 2 },
+  E: { col: 3, row: 2 },
+  I: { col: 0, row: 3 },
+  O: { col: 1, row: 3 },
+  U: { col: 2, row: 3 },
+  happy: { col: 3, row: 3 },
+};
+
+/**
  * Articulatory Oculus / ARKit-calibrated viseme shapes for English pronunciation.
- * - PP (/p, b, m/): Bilabial seal with lip press
- * - FF (/f, v/): Labiodental lower-lip tuck under upper teeth
- * - TH (/θ, ð/): Interdental tongue-tip between parted lips
- * - DD (/t, d/): Alveolar stop with crisp tongue-tip lift
- * - kk (/k, g, ŋ/): Velar opening at back of mouth
- * - CH (/tʃ, dʒ, ʃ, ʒ/): Postalveolar rounded protrusion
- * - SS (/s, z/): Narrow dental slit with wide lip spread
- * - nn (/n, l/): Alveolar nasal/lateral tongue contact
- * - RR (/r, ɜːr/): Retroflex/bunched R with mild lip rounding
- * - aa (/ɑː, æ, ʌ, aɪ-onset/): Open jaw low vowel
- * - E  (/ɛ, eɪ-onset/): Mid front spread vowel
- * - I  (/iː, ɪ, j/): High front wide smile vowel
- * - O  (/ɔː, oʊ-onset/): Mid-back rounded vowel
- * - U  (/uː, ʊ, w/): High-back tight lip protrusion
  */
 export const VISEME_SHAPES: Record<VisemeId, VisemeWeights> = {
-  sil: { jawOpen: 0.0, lipRound: 0.0, lipWidth: 0.14, lipPress: 0.0, tongueTip: 0.0 },
-  PP: { jawOpen: 0.0, lipRound: 0.0, lipWidth: 0.08, lipPress: 0.96, tongueTip: 0.0 },
-  FF: { jawOpen: 0.11, lipRound: 0.04, lipWidth: 0.36, lipPress: 0.62, tongueTip: 0.08 },
-  TH: { jawOpen: 0.22, lipRound: 0.04, lipWidth: 0.44, lipPress: 0.06, tongueTip: 0.94 },
-  DD: { jawOpen: 0.20, lipRound: 0.06, lipWidth: 0.40, lipPress: 0.08, tongueTip: 0.72 },
-  kk: { jawOpen: 0.28, lipRound: 0.08, lipWidth: 0.34, lipPress: 0.0, tongueTip: 0.16 },
-  CH: { jawOpen: 0.24, lipRound: 0.54, lipWidth: 0.18, lipPress: 0.08, tongueTip: 0.40 },
-  SS: { jawOpen: 0.12, lipRound: 0.04, lipWidth: 0.74, lipPress: 0.14, tongueTip: 0.46 },
-  nn: { jawOpen: 0.18, lipRound: 0.06, lipWidth: 0.36, lipPress: 0.08, tongueTip: 0.80 },
-  RR: { jawOpen: 0.22, lipRound: 0.60, lipWidth: 0.14, lipPress: 0.0, tongueTip: 0.52 },
-  aa: { jawOpen: 0.88, lipRound: 0.12, lipWidth: 0.48, lipPress: 0.0, tongueTip: 0.0 },
-  E: { jawOpen: 0.50, lipRound: 0.04, lipWidth: 0.76, lipPress: 0.0, tongueTip: 0.18 },
-  I: { jawOpen: 0.26, lipRound: 0.0, lipWidth: 0.92, lipPress: 0.0, tongueTip: 0.28 },
-  O: { jawOpen: 0.56, lipRound: 0.88, lipWidth: 0.05, lipPress: 0.0, tongueTip: 0.0 },
-  U: { jawOpen: 0.24, lipRound: 0.96, lipWidth: 0.02, lipPress: 0.0, tongueTip: 0.0 },
+  sil: { jawOpen: 0.0, lipRound: 0.0, lipWidth: 0.14, lipPress: 0.0, tongueTip: 0.0, teethVisible: 0.0, cheekLift: 0.1 },
+  PP: { jawOpen: 0.0, lipRound: 0.0, lipWidth: 0.08, lipPress: 0.96, tongueTip: 0.0, teethVisible: 0.0, cheekLift: 0.05 },
+  FF: { jawOpen: 0.11, lipRound: 0.04, lipWidth: 0.36, lipPress: 0.62, tongueTip: 0.08, teethVisible: 0.68, cheekLift: 0.12 },
+  TH: { jawOpen: 0.22, lipRound: 0.04, lipWidth: 0.44, lipPress: 0.06, tongueTip: 0.94, teethVisible: 0.55, cheekLift: 0.1 },
+  DD: { jawOpen: 0.2, lipRound: 0.06, lipWidth: 0.4, lipPress: 0.08, tongueTip: 0.72, teethVisible: 0.45, cheekLift: 0.14 },
+  kk: { jawOpen: 0.28, lipRound: 0.08, lipWidth: 0.34, lipPress: 0.0, tongueTip: 0.16, teethVisible: 0.32, cheekLift: 0.1 },
+  CH: { jawOpen: 0.24, lipRound: 0.54, lipWidth: 0.18, lipPress: 0.08, tongueTip: 0.4, teethVisible: 0.24, cheekLift: 0.12 },
+  SS: { jawOpen: 0.12, lipRound: 0.04, lipWidth: 0.74, lipPress: 0.14, tongueTip: 0.46, teethVisible: 0.76, cheekLift: 0.32 },
+  nn: { jawOpen: 0.18, lipRound: 0.06, lipWidth: 0.36, lipPress: 0.08, tongueTip: 0.8, teethVisible: 0.35, cheekLift: 0.15 },
+  RR: { jawOpen: 0.22, lipRound: 0.6, lipWidth: 0.14, lipPress: 0.0, tongueTip: 0.52, teethVisible: 0.18, cheekLift: 0.1 },
+  aa: { jawOpen: 0.88, lipRound: 0.12, lipWidth: 0.48, lipPress: 0.0, tongueTip: 0.0, teethVisible: 0.48, cheekLift: 0.18 },
+  E: { jawOpen: 0.5, lipRound: 0.04, lipWidth: 0.76, lipPress: 0.0, tongueTip: 0.18, teethVisible: 0.62, cheekLift: 0.38 },
+  I: { jawOpen: 0.26, lipRound: 0.0, lipWidth: 0.92, lipPress: 0.0, tongueTip: 0.28, teethVisible: 0.82, cheekLift: 0.64 },
+  O: { jawOpen: 0.56, lipRound: 0.88, lipWidth: 0.05, lipPress: 0.0, tongueTip: 0.0, teethVisible: 0.12, cheekLift: 0.08 },
+  U: { jawOpen: 0.24, lipRound: 0.96, lipWidth: 0.02, lipPress: 0.0, tongueTip: 0.0, teethVisible: 0.05, cheekLift: 0.06 },
 };
+
+const EXPRESSIONS_BY_VISEME = new Map<VisemeId, MouthExpression[]>();
+for (const exp of VISEME_EXPRESSIONS_50) {
+  const list = EXPRESSIONS_BY_VISEME.get(exp.visemeId) ?? [];
+  list.push(exp);
+  EXPRESSIONS_BY_VISEME.set(exp.visemeId, list);
+}
+
+/**
+ * Resolves the exact DB mouth expression (M01..M50) for a viseme + ARPAbet phoneme.
+ */
+export function resolveExpressionForPhoneme(visemeId: VisemeId, phoneme?: string): MouthExpression {
+  const candidates = EXPRESSIONS_BY_VISEME.get(visemeId) ?? [VISEME_EXPRESSIONS_50[VISEME_EXPRESSIONS_50.length - 1]];
+  if (phoneme) {
+    const cleanP = phoneme.replace(/[0-9]/g, '').toUpperCase();
+    const exact = candidates.find(
+      (c) => c.arpabet.toUpperCase() === cleanP || c.arpabet.toUpperCase().startsWith(cleanP),
+    );
+    if (exact) return exact;
+  }
+  return candidates[0];
+}
 
 interface PhonemeUnit {
   v: VisemeId;
@@ -512,7 +545,9 @@ export function englishWordToVisemes(rawWord: string): PhonemeUnit[] {
  */
 export function generateVisemeTimeline(text: string, speedMultiplier = 1.0): VisemeFrame[] {
   const clean = text.trim();
-  if (!clean) return [{ v: 'sil', t: 0, d: 100 }];
+  if (!clean) {
+    return [{ v: 'sil', t: 0, d: 100, expressionCode: 'M50' }];
+  }
 
   const safeSpeed = Math.max(0.6, Math.min(1.5, speedMultiplier));
   const frames: VisemeFrame[] = [];
@@ -521,13 +556,14 @@ export function generateVisemeTimeline(text: string, speedMultiplier = 1.0): Vis
   const pushFrame = (v: VisemeId, baseDurationMs: number, charStart?: number, charEnd?: number, phoneme?: string) => {
     const d = Math.max(24, Math.round(baseDurationMs / safeSpeed));
     const prev = frames[frames.length - 1];
+    const expressionCode = resolveExpressionForPhoneme(v, phoneme).code;
     // Preserve distinct repeated bilabial closures (PP) and word boundaries
     if (prev && prev.v === v && v !== 'sil' && v !== 'PP' && prev.charStart === charStart) {
       const ext = Math.round(d * 0.65);
       prev.d += ext;
       cursorMs += ext;
     } else {
-      frames.push({ v, t: cursorMs, d, charStart, charEnd, phoneme });
+      frames.push({ v, t: cursorMs, d, charStart, charEnd, phoneme, expressionCode });
       cursorMs += d;
     }
   };
@@ -558,7 +594,7 @@ export function generateVisemeTimeline(text: string, speedMultiplier = 1.0): Vis
     }
   }
 
-  frames.push({ v: 'sil', t: cursorMs, d: 120, phoneme: 'END' });
+  frames.push({ v: 'sil', t: cursorMs, d: 120, phoneme: 'END', expressionCode: 'M50' });
   return frames;
 }
 
@@ -586,37 +622,89 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
+export interface VisemePlaybackSample {
+  weights: VisemeWeights;
+  primaryViseme: VisemeId;
+  nextViseme: VisemeId;
+  blendT: number; // 0..1 smooth crossfade from primaryViseme to nextViseme
+  expressionCode: string;
+}
+
 /**
- * Samples smoothly coarticulated viseme weights at `elapsedMs`.
- * Blends across phoneme transitions using a cosine curve while preserving
- * bilabial closures (PP) and interdental peaks (TH).
+ * Samples smoothly coarticulated viseme weights AND exact atlas crossfade parameters at `elapsedMs`.
  */
-export function sampleVisemeAt(frames: VisemeFrame[], elapsedMs: number): VisemeWeights {
-  if (!frames.length) return VISEME_SHAPES.sil;
+export function sampleVisemePlaybackState(frames: VisemeFrame[], elapsedMs: number): VisemePlaybackSample {
+  if (!frames.length) {
+    return {
+      weights: VISEME_SHAPES.sil,
+      primaryViseme: 'sil',
+      nextViseme: 'sil',
+      blendT: 0,
+      expressionCode: 'M50',
+    };
+  }
 
   for (let i = 0; i < frames.length; i++) {
     const f = frames[i];
     if (elapsedMs >= f.t && elapsedMs < f.t + f.d) {
       const curr = VISEME_SHAPES[f.v] ?? VISEME_SHAPES.sil;
+      const expressionCode = f.expressionCode ?? resolveExpressionForPhoneme(f.v, f.phoneme).code;
       const nextFrame = frames[i + 1];
-      if (!nextFrame) return curr;
+      if (!nextFrame) {
+        return {
+          weights: curr,
+          primaryViseme: f.v,
+          nextViseme: f.v,
+          blendT: 0,
+          expressionCode,
+        };
+      }
 
-      const blendMs = Math.min(24, f.d * 0.35);
+      const blendMs = Math.min(34, f.d * 0.48);
       const timeLeft = f.t + f.d - elapsedMs;
       if (timeLeft < blendMs && blendMs > 0) {
         const rawT = 1 - timeLeft / blendMs;
         const smoothT = 0.5 - 0.5 * Math.cos(rawT * Math.PI);
         const next = VISEME_SHAPES[nextFrame.v] ?? VISEME_SHAPES.sil;
         return {
-          jawOpen: lerp(curr.jawOpen, next.jawOpen, smoothT),
-          lipRound: lerp(curr.lipRound, next.lipRound, smoothT),
-          lipWidth: lerp(curr.lipWidth, next.lipWidth, smoothT),
-          lipPress: lerp(curr.lipPress, next.lipPress, smoothT),
-          tongueTip: lerp(curr.tongueTip, next.tongueTip, smoothT),
+          weights: {
+            jawOpen: lerp(curr.jawOpen, next.jawOpen, smoothT),
+            lipRound: lerp(curr.lipRound, next.lipRound, smoothT),
+            lipWidth: lerp(curr.lipWidth, next.lipWidth, smoothT),
+            lipPress: lerp(curr.lipPress, next.lipPress, smoothT),
+            tongueTip: lerp(curr.tongueTip, next.tongueTip, smoothT),
+            teethVisible: lerp(curr.teethVisible, next.teethVisible, smoothT),
+            cheekLift: lerp(curr.cheekLift, next.cheekLift, smoothT),
+          },
+          primaryViseme: f.v,
+          nextViseme: nextFrame.v,
+          blendT: smoothT,
+          expressionCode,
         };
       }
-      return curr;
+
+      return {
+        weights: curr,
+        primaryViseme: f.v,
+        nextViseme: f.v,
+        blendT: 0,
+        expressionCode,
+      };
     }
   }
-  return VISEME_SHAPES.sil;
+
+  return {
+    weights: VISEME_SHAPES.sil,
+    primaryViseme: 'sil',
+    nextViseme: 'sil',
+    blendT: 0,
+    expressionCode: 'M50',
+  };
+}
+
+/**
+ * Samples smoothly coarticulated viseme weights at `elapsedMs`.
+ */
+export function sampleVisemeAt(frames: VisemeFrame[], elapsedMs: number): VisemeWeights {
+  return sampleVisemePlaybackState(frames, elapsedMs).weights;
 }

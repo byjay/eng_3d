@@ -88,6 +88,37 @@ export interface MouthExpression {
   mood: TutorMood;
 }
 
+export interface TutorExpressionPhoto {
+  id: number;
+  tutorId: TutorId;
+  photoCode: string; // e.g., AMY-M01 .. AMY-E52
+  expressionCode: string; // M01..M50, E51, E52
+  visemeId: VisemeId;
+  ipa: string;
+  arpabet: string;
+  name: string;
+  nameKo: string;
+  articulatoryCueKo: string;
+  sampleWord: string;
+  sampleSentence: string;
+  atlasUrl: string;
+  tileCol: number;
+  tileRow: number;
+  blendTileCol: number;
+  blendTileRow: number;
+  blendRatio: number;
+  jawOpen: number;
+  lipRound: number;
+  lipWidth: number;
+  lipPress: number;
+  tongueTip: number;
+  teethVisible: number;
+  cheekLift: number;
+  browLift: number;
+  smileBias: number;
+  mood: TutorMood;
+}
+
 export interface FacialAnchors {
   mouthUV: [number, number];
   leftEyeUV: [number, number];
@@ -101,6 +132,7 @@ export interface TutorProfile {
   accent: string;
   voiceName: 'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr';
   portraitUrl: string;
+  visemeAtlasUrl: string;
   facialAnchors: FacialAnchors;
   blazerColor: number;
   shirtColor: number;

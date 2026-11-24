@@ -8,7 +8,7 @@ import { SrsReviewPanel } from './components/SrsReviewPanel';
 import { ProgressPanel } from './components/ProgressPanel';
 import { PrivacyModal } from './components/PrivacyModal';
 import { computeSm2Schedule, getDueCards } from './core/srs';
-import { generateVisemeTimeline } from './core/viseme';
+import { findVisemeTimeForCharIndex, generateVisemeTimeline } from './core/viseme';
 import { markHabitSentenceCompleted } from './core/sentenceEngine';
 import {
   emitToAndroidHost,
@@ -25,6 +25,7 @@ import {
   TUTOR_PROFILES,
 } from './data/seedData';
 import { CORE_SENTENCES_500 } from './data/sentences500';
+import { getTutorExpressionPhotos } from './data/tutorExpressionPhotos';
 import { resolveGestureForTutor, TUTOR_GESTURES_BY_ID } from './data/gestures';
 import type {
   ActiveTab,
@@ -39,6 +40,7 @@ import type {
   ScenarioTemplate,
   SentenceFormMode,
   SrsCard,
+  TutorExpressionPhoto,
   TutorGesture,
   TutorMood,
   TutorProfile,
@@ -106,6 +108,10 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [inputText, setInputText] = useState('');
   const [latestHints, setLatestHints] = useState<HintSuggestion[]>([]);
+  const [tutorExpressions, setTutorExpressions] = useState<TutorExpressionPhoto[]>(() =>
+    getTutorExpressionPhotos(initialTutor.id),
+  );
+  const [previewExpression, setPreviewExpression] = useState<TutorExpressionPhoto | null>(null);
 
   const [turns, setTurns] = useState<ChatTurn[]>(() => [
     {
@@ -179,6 +185,25 @@ export default function App() {
     }
   }, [habitProgress]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setPreviewExpression(null);
+    setTutorExpressions(getTutorExpressionPhotos(activeTutor.id));
+    fetch(getApiUrl(`/api/v1/visemes/tutors/${activeTutor.id}/expressions`))
+      .then((res) => (res.ok ? safeParseJsonResponse<{ photos?: TutorExpressionPhoto[] }>(res) : null))
+      .then((data) => {
+        if (!cancelled && data?.photos && data.photos.length >= 50) {
+          setTutorExpressions(data.photos);
+        }
+      })
+      .catch(() => {
+        // Fallback to local 52-photo catalog already set above
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTutor.id]);
+
   const dueSrsCount = useMemo(() => getDueCards(srsCards).length, [srsCards]);
   const tutorGestures = TUTOR_GESTURES_BY_ID[activeTutor.id];
   const activeGestureDef = useMemo(
@@ -205,6 +230,7 @@ export default function App() {
       window.speechSynthesis.cancel();
     }
     playbackRef.current.active = false;
+    playbackRef.current.audioElement = null;
     setIsSpeaking(false);
   }, []);
 
@@ -220,11 +246,12 @@ export default function App() {
       const frames = visemes && visemes.length > 0 ? visemes : generateVisemeTimeline(text, speed);
       const totalMs = Math.max(1200, frames.reduce((acc, f) => Math.max(acc, f.t + f.d), 0) + 180);
 
-      const startVisemePlayback = () => {
+      const startVisemePlayback = (audioEl?: HTMLAudioElement | null) => {
         playbackRef.current = {
           startedAtMs: performance.now(),
           frames,
           active: true,
+          audioElement: audioEl ?? null,
         };
         setIsSpeaking(true);
         emitToAndroidHost({ type: 'speech_started', text });
@@ -236,13 +263,14 @@ export default function App() {
           speechFallbackTimerRef.current = null;
         }
         playbackRef.current.active = false;
+        playbackRef.current.audioElement = null;
         setIsSpeaking(false);
         emitToAndroidHost({ type: 'speech_ended' });
       };
 
       const speakWithWebSpeechFallback = () => {
         if (window.AndroidTutorBridge?.speak) {
-          startVisemePlayback();
+          startVisemePlayback(null);
           window.AndroidTutorBridge.speak(text, activeTutor.accent.includes('British') ? 'en-GB' : 'en-US', speed);
           speechFallbackTimerRef.current = window.setTimeout(finishVisemePlayback, totalMs);
           return;
@@ -254,7 +282,7 @@ export default function App() {
           rate: speed,
         });
 
-        startVisemePlayback();
+        startVisemePlayback(null);
         // Guarantee lip-sync finishes cleanly even if browser/WebView suppresses speechSynthesis events
         speechFallbackTimerRef.current = window.setTimeout(finishVisemePlayback, totalMs);
 
@@ -272,6 +300,12 @@ export default function App() {
                   voices.find((v) => v.lang.toLowerCase().startsWith(targetLang.toLowerCase())) ??
                   voices.find((v) => v.lang.toLowerCase().startsWith('en'));
                 if (matchedVoice) u.voice = matchedVoice;
+                u.onboundary = (ev) => {
+                  const targetMs = findVisemeTimeForCharIndex(frames, ev.charIndex);
+                  if (targetMs !== null) {
+                    playbackRef.current.startedAtMs = performance.now() - targetMs;
+                  }
+                };
                 u.onend = finishVisemePlayback;
                 u.onerror = () => {
                   // Keep viseme animation running for natural visual duration even if audio policy blocked TTS
@@ -310,7 +344,7 @@ export default function App() {
         if (base64Audio) {
           const audio = new Audio(`data:audio/wav;base64,${base64Audio}`);
           activeAudioRef.current = audio;
-          audio.onplay = () => startVisemePlayback();
+          audio.onplay = () => startVisemePlayback(audio);
           audio.onended = finishVisemePlayback;
           audio.onerror = () => speakWithWebSpeechFallback();
           await audio.play();
@@ -884,6 +918,7 @@ export default function App() {
             fallback2D={fallback2D}
             onWebGlLost={() => setFallback2D(true)}
             cameraPreset={cameraPreset}
+            previewExpression={previewExpression}
           />
 
           <TutorDock
@@ -955,7 +990,19 @@ export default function App() {
           playbackRef={playbackRef}
           fallback2D={fallback2D}
           onWebGlLost={() => setFallback2D(true)}
+          tutorExpressions={tutorExpressions}
+          previewExpression={previewExpression}
+          onPreviewExpression={(exp) => {
+            setPreviewExpression(exp);
+            if (exp) {
+              setMood(exp.mood);
+              setGesture(`${activeTutor.id}_articulate_enunciation`);
+              setGestureNonce((n) => n + 1);
+              void playTutorVoice(exp.sampleWord, undefined, undefined, 0.78);
+            }
+          }}
           onSpeakText={(text, speed, targetMood, gestureSlug) => {
+            setPreviewExpression(null);
             if (targetMood) setMood(targetMood);
             if (gestureSlug) {
               setGesture(`${activeTutor.id}_${gestureSlug}`);

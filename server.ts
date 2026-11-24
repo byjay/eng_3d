@@ -7,9 +7,10 @@ import Groq from 'groq-sdk';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { generateVisemeTimeline } from './src/core/viseme';
 import { GroqKeyRotator, loadGroqKeysFromEnv } from './src/core/groqRotator';
-import { YOUTUBE_CLIPS_INDEX } from './src/data/seedData';
+import { TUTOR_PROFILES, YOUTUBE_CLIPS_INDEX } from './src/data/seedData';
 import { GESTURE_SLUGS } from './src/data/gestures';
-import type { CefrLevel, TutorMood, TutorGesture } from './src/core/types';
+import { VisemeExpressionDb } from './src/db/visemeExpressionDb';
+import type { CefrLevel, TutorMood, TutorGesture, TutorId } from './src/core/types';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -254,6 +255,7 @@ async function synthesizeTtsWithGemini(cleanText: string, validVoice: string): P
 
 async function startServer() {
   const app = express();
+  const visemeDb = new VisemeExpressionDb();
   // Enable CORS so host Android WebView / Flutter InAppWebView apps can call this API cross-origin
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -273,6 +275,8 @@ async function startServer() {
       service: 'fluentstage-3d',
       llmProvider: groqRotator.hasKeys() ? 'groq-5key-rotator' : 'gemini-4-hydrogen',
       groqKeysConfigured: groqRotator.size,
+      visemeExpressionsCount: visemeDb.count(),
+      tutorExpressionPhotosCount: visemeDb.countTutorPhotos(),
     });
   });
 
@@ -282,6 +286,46 @@ async function startServer() {
       model: GROQ_MODEL,
       ...groqRotator.getStatus(),
     });
+  });
+
+  // 0a. Canonical 50 Mouth-Shape Expressions DB API
+  app.get('/api/v1/visemes/expressions', (req, res) => {
+    const viseme = typeof req.query.viseme === 'string' ? req.query.viseme : undefined;
+    const q = typeof req.query.q === 'string' ? req.query.q : undefined;
+    const expressions = visemeDb.list({ viseme, q });
+    res.json({ expressions, total: expressions.length });
+  });
+
+  app.get('/api/v1/visemes/expressions/:code', (req, res) => {
+    const found = visemeDb.getByCode(req.params.code);
+    if (!found) {
+      res.status(404).json({ error: `Mouth expression ${req.params.code} not found.` });
+      return;
+    }
+    res.json({ expression: found });
+  });
+
+  // 0b. Per-Tutor 52 Gemini Banana Expression & Photo DB API (260 total across 5 tutors)
+  app.get('/api/v1/visemes/tutors/:tutorId/expressions', (req, res) => {
+    const tutorId = req.params.tutorId.toLowerCase() as TutorId;
+    if (!TUTOR_PROFILES.some((t) => t.id === tutorId)) {
+      res.status(404).json({ error: `Tutor "${req.params.tutorId}" not found.` });
+      return;
+    }
+    const viseme = typeof req.query.viseme === 'string' ? req.query.viseme : undefined;
+    const q = typeof req.query.q === 'string' ? req.query.q : undefined;
+    const photos = visemeDb.listTutorPhotos({ tutorId, viseme, q });
+    res.json({ tutorId, photos, total: photos.length });
+  });
+
+  app.get('/api/v1/visemes/tutors/:tutorId/expressions/:code', (req, res) => {
+    const tutorId = req.params.tutorId.toLowerCase() as TutorId;
+    const found = visemeDb.getTutorPhotoByCode(tutorId, req.params.code);
+    if (!found) {
+      res.status(404).json({ error: `Expression photo "${req.params.code}" not found for tutor "${tutorId}".` });
+      return;
+    }
+    res.json({ photo: found });
   });
 
   // 1. 3D AI Tutor Chat Turn (5-Key Groq Rotator primary with Gemini 4 Hydrogen fallback)
@@ -522,7 +566,7 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(
-      `FluentStage 3D server listening on http://localhost:${PORT} (Groq keys: ${groqRotator.size})`,
+      `FluentStage 3D server listening on http://localhost:${PORT} (Groq keys: ${groqRotator.size}, Viseme DB: ${visemeDb.count()} expressions / ${visemeDb.countTutorPhotos()} tutor photos)`,
     );
   });
 }
