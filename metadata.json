@@ -1,0 +1,10 @@
+{
+  "name": "3D영어",
+  "description": "Immersive 3D AI English Tutor with real-time lip-sync, YouTube short-clip shadowing, pronunciation scoring, and SM-2 spaced repetition review.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
